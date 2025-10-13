@@ -17,7 +17,7 @@ A  flexible MySQL to Go struct generator that automatically creates type-safe Go
 
 ### Prerequisites
 
-- Go 1.16 or higher
+- Go 1.25 or higher
 - MySQL database access
 
 
