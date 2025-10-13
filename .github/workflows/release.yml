@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Triggers on version tags like v1.0.0, v2.1.3, etc.
+
+permissions:
+  contents: write  # Required for creating releases
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Linux builds
+          - goos: linux
+            goarch: amd64
+            output_name: mysql-struct-gen-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output_name: mysql-struct-gen-linux-arm64
+          - goos: linux
+            goarch: arm
+            output_name: mysql-struct-gen-linux-arm
+          
+          # macOS builds
+          - goos: darwin
+            goarch: amd64
+            output_name: mysql-struct-gen-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            output_name: mysql-struct-gen-darwin-arm64
+          
+          # Windows builds
+          - goos: windows
+            goarch: amd64
+            output_name: mysql-struct-gen-windows-amd64.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Get dependencies
+        run: go mod download
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -v \
+            -ldflags="-w -s -X main.Version=${{ github.ref_name }}" \
+            -o dist/${{ matrix.output_name }} \
+            .
+
+      - name: Create archive
+        run: |
+          cd dist
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            zip ${{ matrix.output_name }}.zip ${{ matrix.output_name }}
+            echo "ASSET_PATH=dist/${{ matrix.output_name }}.zip" >> $GITHUB_ENV
+            echo "ASSET_NAME=${{ matrix.output_name }}.zip" >> $GITHUB_ENV
+          else
+            tar czf ${{ matrix.output_name }}.tar.gz ${{ matrix.output_name }}
+            echo "ASSET_PATH=dist/${{ matrix.output_name }}.tar.gz" >> $GITHUB_ENV
+            echo "ASSET_NAME=${{ matrix.output_name }}.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output_name }}
+          path: ${{ env.ASSET_PATH }}
+          retention-days: 1
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          md5sum * > MD5SUMS
+          cat SHA256SUMS
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          cat > RELEASE_NOTES.md << 'EOF'
+          ## mysql-struct-gen ${{ github.ref_name }}
+          
+          ### 📦 Downloads
+          
+          Download the appropriate binary for your platform:
+          
+          #### 🐧 Linux
+          - **x86_64**: `mysql-struct-gen-linux-amd64.tar.gz`
+          - **ARM64**: `mysql-struct-gen-linux-arm64.tar.gz`
+          - **ARM**: `mysql-struct-gen-linux-arm.tar.gz`
+          
+          #### 🍎 macOS
+          - **Intel**: `mysql-struct-gen-darwin-amd64.tar.gz`
+          - **Apple Silicon**: `mysql-struct-gen-darwin-arm64.tar.gz`
+          
+          #### 🪟 Windows
+          - **x86_64**: `mysql-struct-gen-windows-amd64.exe.zip`
+          
+          ### 📥 Installation
+          
+          **Linux/macOS:**
+          ```bash
+          # Download and extract
+          tar xzf mysql-struct-gen-*.tar.gz
+          
+          # Move to PATH
+          sudo mv mysql-struct-gen-* /usr/local/bin/mysql-struct-gen
+          sudo chmod +x /usr/local/bin/mysql-struct-gen
+          
+          # Verify installation
+          mysql-struct-gen -version
+          ```
+          
+          **Windows:**
+          ```powershell
+          # Extract the zip file
+          # Add the directory to your PATH or run directly
+          .\mysql-struct-gen-windows-amd64.exe -version
+          ```
+          
+          ### 🔐 Verify Download
+          
+          Check the SHA256 checksum:
+          ```bash
+          sha256sum -c SHA256SUMS
+          ```
+
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/mysql-struct-gen-linux-amd64.tar.gz
+            dist/mysql-struct-gen-linux-arm64.tar.gz
+            dist/mysql-struct-gen-linux-arm.tar.gz
+            dist/mysql-struct-gen-darwin-amd64.tar.gz
+            dist/mysql-struct-gen-darwin-arm64.tar.gz
+            dist/mysql-struct-gen-windows-amd64.exe.zip
+            dist/SHA256SUMS
+            dist/MD5SUMS
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
