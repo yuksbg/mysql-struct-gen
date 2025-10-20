@@ -191,7 +191,12 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
-          awk '{print $2 "=" $1}' SHA256SUMS > ../checksums.env
+
+          echo "" > ../checksums.env
+          while read -r sha file; do
+            safe_name=$(echo "$file" | tr '.' '_' | tr '-' '_')
+            echo "${safe_name}=${sha}" >> ../checksums.env
+          done < SHA256SUMS
         shell: bash
 
       - name: Update Formula/mysql-struct-gen.rb
@@ -199,12 +204,15 @@ jobs:
           VERSION_TAG: ${{ github.ref_name }}
         run: |
           source checksums.env
+
           sed -i "s/version \".*\"/version \"${VERSION_TAG#v}\"/" Formula/mysql-struct-gen.rb
           sed -i "s|v0.0.0|${VERSION_TAG}|g" Formula/mysql-struct-gen.rb
-          sed -i "s|REPLACE_WITH_SHA256_DARWIN_AMD64|${'mysql-struct-gen-darwin-amd64.tar.gz'}|" Formula/mysql-struct-gen.rb
-          sed -i "s|REPLACE_WITH_SHA256_DARWIN_ARM64|${'mysql-struct-gen-darwin-arm64.tar.gz'}|" Formula/mysql-struct-gen.rb
-          sed -i "s|REPLACE_WITH_SHA256_LINUX_AMD64|${'mysql-struct-gen-linux-amd64.tar.gz'}|" Formula/mysql-struct-gen.rb
-          sed -i "s|REPLACE_WITH_SHA256_LINUX_ARM64|${'mysql-struct-gen-linux-arm64.tar.gz'}|" Formula/mysql-struct-gen.rb
+
+          sed -i "s|REPLACE_WITH_SHA256_DARWIN_AMD64|${mysql_struct_gen_darwin_amd64_tar_gz}|" Formula/mysql-struct-gen.rb
+          sed -i "s|REPLACE_WITH_SHA256_DARWIN_ARM64|${mysql_struct_gen_darwin_arm64_tar_gz}|" Formula/mysql-struct-gen.rb
+          sed -i "s|REPLACE_WITH_SHA256_LINUX_AMD64|${mysql_struct_gen_linux_amd64_tar_gz}|" Formula/mysql-struct-gen.rb
+          sed -i "s|REPLACE_WITH_SHA256_LINUX_ARM64|${mysql_struct_gen_linux_arm64_tar_gz}|" Formula/mysql-struct-gen.rb
+        shell: bash
 
       - name: Commit and push formula update
         run: |
