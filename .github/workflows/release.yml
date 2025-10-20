@@ -206,14 +206,17 @@ jobs:
         run: |
           source checksums.env
 
+          # Update version line
           sed -i "s/version \".*\"/version \"${VERSION_TAG#v}\"/" Formula/mysql-struct-gen.rb
-          sed -i "s|v0.0.0|${VERSION_TAG}|g" Formula/mysql-struct-gen.rb
 
+          # Replace any old version in URLs with the current tag (vX.Y.Z)
+          sed -i -E "s|/releases/download/v[0-9]+\.[0-9]+\.[0-9]+/|/releases/download/${VERSION_TAG}/|g" Formula/mysql-struct-gen.rb
+
+          # Inject new SHA256 checksums
           sed -i "s|REPLACE_WITH_SHA256_DARWIN_AMD64|${mysql_struct_gen_darwin_amd64_tar_gz}|" Formula/mysql-struct-gen.rb
           sed -i "s|REPLACE_WITH_SHA256_DARWIN_ARM64|${mysql_struct_gen_darwin_arm64_tar_gz}|" Formula/mysql-struct-gen.rb
           sed -i "s|REPLACE_WITH_SHA256_LINUX_AMD64|${mysql_struct_gen_linux_amd64_tar_gz}|" Formula/mysql-struct-gen.rb
           sed -i "s|REPLACE_WITH_SHA256_LINUX_ARM64|${mysql_struct_gen_linux_arm64_tar_gz}|" Formula/mysql-struct-gen.rb
-        shell: bash
 
       - name: Commit and push formula update
         run: |
