@@ -12,6 +12,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	_ "modernc.org/sqlite"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,12 +50,13 @@ type Config struct {
 }
 
 type DatabaseConfig struct {
-	Host     string   `yaml:"host"`
-	Port     int      `yaml:"port"`
-	User     string   `yaml:"user"`
-	Password string   `yaml:"password"`
-	Name     string   `yaml:"name"`
-	Tables   []string `yaml:"tables"` // Optional: specific tables to generate
+	Driver   string   `yaml:"driver"`   // Database driver: "mysql" or "sqlite"
+	Host     string   `yaml:"host"`     // For MySQL
+	Port     int      `yaml:"port"`     // For MySQL
+	User     string   `yaml:"user"`     // For MySQL
+	Password string   `yaml:"password"` // For MySQL
+	Name     string   `yaml:"name"`     // Database name for MySQL, file path for SQLite
+	Tables   []string `yaml:"tables"`   // Optional: specific tables to generate
 }
 
 type OutputConfig struct {
@@ -171,7 +173,10 @@ func loadConfig(path string) (*Config, error) {
 	if config.Options.TagLabel == "" {
 		config.Options.TagLabel = "db"
 	}
-	if config.Database.Port == 0 {
+	if config.Database.Driver == "" {
+		config.Database.Driver = "mysql"
+	}
+	if config.Database.Port == 0 && config.Database.Driver == "mysql" {
 		config.Database.Port = 3306
 	}
 
@@ -179,15 +184,26 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func (g *Generator) Generate(ctx context.Context) error {
-	// Connect to database
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/information_schema",
-		g.config.Database.User,
-		g.config.Database.Password,
-		g.config.Database.Host,
-		g.config.Database.Port,
-	)
+	var dsn string
+	driver := g.config.Database.Driver
 
-	db, err := sql.Open("mysql", dsn)
+	// Build DSN based on driver
+	switch driver {
+	case "mysql":
+		dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/information_schema",
+			g.config.Database.User,
+			g.config.Database.Password,
+			g.config.Database.Host,
+			g.config.Database.Port,
+		)
+	case "sqlite":
+		dsn = g.config.Database.Name
+	default:
+		return fmt.Errorf("unsupported driver: %s (supported: mysql, sqlite)", driver)
+	}
+
+	// Connect to database
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -216,10 +232,17 @@ func (g *Generator) Generate(ctx context.Context) error {
 }
 
 func (g *Generator) getSchema(ctx context.Context, db *sql.DB) ([]ColumnSchema, error) {
+	if g.config.Database.Driver == "sqlite" {
+		return g.getSQLiteSchema(ctx, db)
+	}
+	return g.getMySQLSchema(ctx, db)
+}
+
+func (g *Generator) getMySQLSchema(ctx context.Context, db *sql.DB) ([]ColumnSchema, error) {
 	query := `SELECT TABLE_NAME, COLUMN_NAME, IS_NULLABLE, DATA_TYPE,
-		CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, 
-		COLUMN_TYPE, COLUMN_KEY 
-		FROM COLUMNS 
+		CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE,
+		COLUMN_TYPE, COLUMN_KEY
+		FROM COLUMNS
 		WHERE TABLE_SCHEMA = ?`
 
 	args := []interface{}{g.config.Database.Name}
@@ -257,6 +280,86 @@ func (g *Generator) getSchema(ctx context.Context, db *sql.DB) ([]ColumnSchema, 
 	}
 
 	return columns, rows.Err()
+}
+
+func (g *Generator) getSQLiteSchema(ctx context.Context, db *sql.DB) ([]ColumnSchema, error) {
+	// Get list of tables
+	var tableNames []string
+
+	if len(g.config.Database.Tables) > 0 {
+		// Use specified tables
+		tableNames = g.config.Database.Tables
+	} else {
+		// Get all tables
+		query := "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+		rows, err := db.QueryContext(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			tableNames = append(tableNames, name)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	var allColumns []ColumnSchema
+
+	// Get column info for each table using PRAGMA table_info
+	for _, tableName := range tableNames {
+		query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
+		rows, err := db.QueryContext(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get schema for table %s: %w", tableName, err)
+		}
+
+		for rows.Next() {
+			var cid int
+			var name, colType string
+			var notNull, pk int
+			var dfltValue sql.NullString
+
+			if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+				rows.Close()
+				return nil, err
+			}
+
+			// Parse SQLite type to extract base type
+			dataType := strings.ToLower(colType)
+			if idx := strings.Index(dataType, "("); idx != -1 {
+				dataType = dataType[:idx]
+			}
+			dataType = strings.TrimSpace(dataType)
+
+			cs := ColumnSchema{
+				TableName:  tableName,
+				ColumnName: name,
+				IsNullable: "YES",
+				DataType:   dataType,
+				ColumnType: colType,
+				ColumnKey:  "",
+			}
+
+			if notNull == 1 {
+				cs.IsNullable = "NO"
+			}
+			if pk == 1 {
+				cs.ColumnKey = "PRI"
+			}
+
+			allColumns = append(allColumns, cs)
+		}
+		rows.Close()
+	}
+
+	return allColumns, nil
 }
 
 func (g *Generator) buildTemplateData(schemas []ColumnSchema) *TemplateData {
@@ -375,8 +478,13 @@ func (g *Generator) goType(col *ColumnSchema) (string, string) {
 	isNullable := col.IsNullable == "YES"
 
 	var goType string
-	switch col.DataType {
-	case "char", "varchar", "enum", "set", "text", "longtext", "mediumtext", "tinytext":
+	dataType := strings.ToLower(col.DataType)
+
+	// Handle both MySQL and SQLite types
+	switch dataType {
+	// String types (MySQL + SQLite)
+	case "char", "varchar", "enum", "set", "text", "longtext", "mediumtext", "tinytext",
+		"character", "nchar", "nvarchar", "clob": // SQLite text types
 		if isNullable && !g.config.Options.UseZeroValues {
 			if g.config.Options.UsePointers {
 				goType = "*string"
@@ -388,9 +496,11 @@ func (g *Generator) goType(col *ColumnSchema) (string, string) {
 			goType = "string"
 		}
 
+	// Binary types (MySQL + SQLite)
 	case "blob", "mediumblob", "longblob", "varbinary", "binary":
 		goType = "[]byte"
 
+	// Date/time types (MySQL + SQLite)
 	case "date", "time", "datetime", "timestamp":
 		if isNullable && !g.config.Options.UseZeroValues {
 			if g.config.Options.UsePointers {
@@ -405,7 +515,9 @@ func (g *Generator) goType(col *ColumnSchema) (string, string) {
 			requiredImport = "time"
 		}
 
-	case "bit", "tinyint", "smallint", "int", "mediumint", "bigint":
+	// Integer types (MySQL + SQLite)
+	case "bit", "tinyint", "smallint", "int", "mediumint", "bigint",
+		"integer", "int2", "int8": // SQLite integer types
 		if isNullable && !g.config.Options.UseZeroValues {
 			if g.config.Options.UsePointers {
 				goType = "*int64"
@@ -417,7 +529,9 @@ func (g *Generator) goType(col *ColumnSchema) (string, string) {
 			goType = "int64"
 		}
 
-	case "float", "decimal", "double":
+	// Float types (MySQL + SQLite)
+	case "float", "decimal", "double",
+		"real", "numeric": // SQLite float types
 		if isNullable && !g.config.Options.UseZeroValues {
 			if g.config.Options.UsePointers {
 				goType = "*float64"
@@ -427,6 +541,19 @@ func (g *Generator) goType(col *ColumnSchema) (string, string) {
 			}
 		} else {
 			goType = "float64"
+		}
+
+	// Boolean (SQLite)
+	case "boolean", "bool":
+		if isNullable && !g.config.Options.UseZeroValues {
+			if g.config.Options.UsePointers {
+				goType = "*bool"
+			} else {
+				goType = "sql.NullBool"
+				requiredImport = "database/sql"
+			}
+		} else {
+			goType = "bool"
 		}
 
 	default:
@@ -465,7 +592,7 @@ func main() {
 	versionShort := flag.Bool("v", false, "Show version information (shorthand)")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "MySQL to Go Struct Generator\n\n")
+		fmt.Fprintf(os.Stderr, "MySQL and SQLite to Go Struct Generator\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  %s [options]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Options:\n")
@@ -473,6 +600,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "        Path to configuration file (default: config.yaml)\n")
 		fmt.Fprintf(os.Stderr, "  -v, -version\n")
 		fmt.Fprintf(os.Stderr, "        Show version information\n")
+		fmt.Fprintf(os.Stderr, "\nSupported Databases:\n")
+		fmt.Fprintf(os.Stderr, "  - MySQL\n")
+		fmt.Fprintf(os.Stderr, "  - SQLite\n")
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -c myconfig.yaml\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -config production.yaml\n", os.Args[0])
@@ -484,7 +614,7 @@ func main() {
 	// Show version and exit
 	if *version || *versionShort {
 		fmt.Printf("mysql-struct-gen version %s\n", Version)
-		fmt.Println("Modern MySQL to Go struct generator")
+		fmt.Println("Modern MySQL and SQLite to Go struct generator")
 		os.Exit(0)
 	}
 

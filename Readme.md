@@ -1,11 +1,12 @@
 # mysql-struct-gen
 
-A  flexible MySQL to Go struct generator that automatically creates type-safe Go structs from your database schema.
+A flexible MySQL and SQLite to Go struct generator that automatically creates type-safe Go structs from your database schema.
 
 
 ## Features
 
-- 🚀 **Automatic Struct Generation** - Generate Go structs directly from MySQL database tables
+- 🚀 **Automatic Struct Generation** - Generate Go structs directly from MySQL or SQLite database tables
+- 🗄️ **Multi-Database Support** - Works with both MySQL and SQLite databases
 - 🎨 **Custom Templates** - Use inline templates, external template files, or the built-in default
 - 🏷️ **Flexible Tagging** - Support for `db`, `json`, `gorm`, `validate`, and custom struct tags
 - 🔧 **Configurable Null Handling** - Choose between `sql.Null*`, pointers, or zero values for nullable fields
@@ -18,21 +19,44 @@ A  flexible MySQL to Go struct generator that automatically creates type-safe Go
 ### Prerequisites
 
 - Go 1.25 or higher
-- MySQL database access
+- MySQL database access (for MySQL) or SQLite database file (for SQLite)
 
 
 
 ## Quick Start
 
+### MySQL Example
+
 1. **Create a configuration file** (`config.yaml`):
 
 ```yaml
 database:
+  driver: mysql  # or "sqlite"
   host: 127.0.0.1
   port: 3306
   user: root
   password: your_password
   name: your_database
+
+output:
+  package_name: models
+  file_name: models/db_structs.go
+
+options:
+  tag_label: db
+  json_tags: true
+  use_pointers: false
+  use_zero_values: true
+```
+
+### SQLite Example
+
+1. **Create a configuration file** (`config.sqlite.yaml`):
+
+```yaml
+database:
+  driver: sqlite
+  name: /path/to/your/database.db
 
 output:
   package_name: models
@@ -72,13 +96,28 @@ func main() {
 
 ### Database Configuration
 
+#### MySQL Configuration
+
 ```yaml
 database:
+  driver: mysql            # Database driver (mysql or sqlite)
   host: 127.0.0.1          # MySQL host
   port: 3306               # MySQL port (default: 3306)
   user: root               # Database user
   password: your_password  # Database password
   name: your_database      # Database name
+  tables:                  # Optional: specific tables to generate
+    - users
+    - posts
+    - comments
+```
+
+#### SQLite Configuration
+
+```yaml
+database:
+  driver: sqlite           # Database driver
+  name: /path/to/db.db     # Path to SQLite database file
   tables:                  # Optional: specific tables to generate
     - users
     - posts
@@ -282,15 +321,16 @@ additional_tags:
 
 ## Type Mappings
 
-Default MySQL to Go type mappings:
+Default MySQL and SQLite to Go type mappings:
 
-| MySQL Type | Go Type | Nullable (sql.Null*) | Nullable (pointer) |
-|------------|---------|----------------------|-------------------|
-| VARCHAR, TEXT | string | sql.NullString | *string |
-| INT, BIGINT | int64 | sql.NullInt64 | *int64 |
-| FLOAT, DECIMAL | float64 | sql.NullFloat64 | *float64 |
-| DATETIME, TIMESTAMP | time.Time | sql.NullTime | *time.Time |
-| BLOB, BINARY | []byte | []byte | []byte |
+| MySQL Type | SQLite Type | Go Type | Nullable (sql.Null*) | Nullable (pointer) |
+|------------|-------------|---------|----------------------|-------------------|
+| VARCHAR, TEXT | TEXT | string | sql.NullString | *string |
+| INT, BIGINT | INTEGER | int64 | sql.NullInt64 | *int64 |
+| FLOAT, DECIMAL | REAL | float64 | sql.NullFloat64 | *float64 |
+| DATETIME, TIMESTAMP | DATETIME | time.Time | sql.NullTime | *time.Time |
+| BLOB, BINARY | BLOB | []byte | []byte | []byte |
+| - | BOOLEAN | bool | sql.NullBool | *bool |
 
 Override with `custom_type_mappings`:
 
@@ -379,6 +419,7 @@ options:
 ## Dependencies
 
 - [go-sql-driver/mysql](https://github.com/go-sql-driver/mysql) - MySQL driver
+- [modernc.org/sqlite](https://modernc.org/sqlite) - SQLite driver (pure Go implementation using cznic/sqlite)
 - [gopkg.in/yaml.v3](https://gopkg.in/yaml.v3) - YAML parsing
 
 ## License
