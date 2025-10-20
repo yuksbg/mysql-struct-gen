@@ -25,7 +25,7 @@ jobs:
           - goos: linux
             goarch: arm
             output_name: mysql-struct-gen-linux-arm
-          
+
           # macOS builds
           - goos: darwin
             goarch: amd64
@@ -33,7 +33,7 @@ jobs:
           - goos: darwin
             goarch: arm64
             output_name: mysql-struct-gen-darwin-arm64
-          
+
           # Windows builds
           - goos: windows
             goarch: amd64
@@ -86,7 +86,7 @@ jobs:
           retention-days: 1
 
   release:
-    name: Create Release
+    name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -115,9 +115,6 @@ jobs:
           ## mysql-struct-gen ${{ github.ref_name }}
           
           ### 📦 Downloads
-          
-          Download the appropriate binary for your platform:
-          
           #### 🐧 Linux
           - **x86_64**: `mysql-struct-gen-linux-amd64.tar.gz`
           - **ARM64**: `mysql-struct-gen-linux-arm64.tar.gz`
@@ -131,34 +128,22 @@ jobs:
           - **x86_64**: `mysql-struct-gen-windows-amd64.exe.zip`
           
           ### 📥 Installation
-          
           **Linux/macOS:**
           ```bash
-          # Download and extract
           tar xzf mysql-struct-gen-*.tar.gz
-          
-          # Move to PATH
           sudo mv mysql-struct-gen-* /usr/local/bin/mysql-struct-gen
           sudo chmod +x /usr/local/bin/mysql-struct-gen
-          
-          # Verify installation
           mysql-struct-gen -version
           ```
-          
           **Windows:**
           ```powershell
-          # Extract the zip file
-          # Add the directory to your PATH or run directly
           .\mysql-struct-gen-windows-amd64.exe -version
           ```
-          
           ### 🔐 Verify Download
-          
-          Check the SHA256 checksum:
           ```bash
           sha256sum -c SHA256SUMS
           ```
-
+          EOF
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -178,3 +163,53 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-formula:
+    name: Update Homebrew Formula
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install GitHub CLI
+        run: sudo apt-get install -y gh
+
+      - name: Download release assets
+        run: |
+          mkdir dist
+          gh release download "${GITHUB_REF_NAME}" --pattern "*.tar.gz" --dir dist
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculate SHA256 checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          awk '{print $2 "=" $1}' SHA256SUMS > ../checksums.env
+        shell: bash
+
+      - name: Update Formula/mysql-struct-gen.rb
+        env:
+          VERSION_TAG: ${{ github.ref_name }}
+        run: |
+          source checksums.env
+          sed -i "s/version \".*\"/version \"${VERSION_TAG#v}\"/" Formula/mysql-struct-gen.rb
+          sed -i "s|v0.0.0|${VERSION_TAG}|g" Formula/mysql-struct-gen.rb
+          sed -i "s|REPLACE_WITH_SHA256_DARWIN_AMD64|${'mysql-struct-gen-darwin-amd64.tar.gz'}|" Formula/mysql-struct-gen.rb
+          sed -i "s|REPLACE_WITH_SHA256_DARWIN_ARM64|${'mysql-struct-gen-darwin-arm64.tar.gz'}|" Formula/mysql-struct-gen.rb
+          sed -i "s|REPLACE_WITH_SHA256_LINUX_AMD64|${'mysql-struct-gen-linux-amd64.tar.gz'}|" Formula/mysql-struct-gen.rb
+          sed -i "s|REPLACE_WITH_SHA256_LINUX_ARM64|${'mysql-struct-gen-linux-arm64.tar.gz'}|" Formula/mysql-struct-gen.rb
+
+      - name: Commit and push formula update
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add Formula/mysql-struct-gen.rb
+          git commit -m "Update Homebrew formula for ${GITHUB_REF_NAME}" || echo "No changes to commit"
+          git push
